@@ -31,8 +31,8 @@ A RISC-V CPU and system-on-chip written from scratch in Verilog, built up in sta
 | # | Milestone | Done when | Target |
 |---|-----------|-----------|--------|
 | M0 | Toolchain and repo setup | All tools verified, repo cloned | Done (Nov 9, 2026) |
-| M1 | RV32I core | All `rv32ui-p-*` tests pass in Verilator | Nov 2026 |
-| M1.5 | Lockstep verification | Core trace compared against Spike, first mismatch reported automatically | Nov 2026 |
+| M1 | RV32I core | All `rv32ui-p-*` tests pass in Verilator | Done (Nov 9, 2026) |
+| M1.5 | Lockstep verification | Core trace compared against Spike, first mismatch reported automatically | Done (Nov 10, 2026) |
 | M2 | M extension | All `rv32um-p-*` tests pass | Nov 2026 |
 | M3 | A extension | All `rv32ua-p-*` tests pass | Late Nov 2026 |
 | M4 | CSRs, M-mode traps, interrupts | All `rv32mi-p-*` tests pass; bare-metal C prints over UART; timer interrupt fires | Dec 2026 |
