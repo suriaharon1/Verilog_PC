@@ -6,6 +6,7 @@
 #   make tests     build the rv32ui riscv-tests (ELF + flat binary)
 #   make test      run the full rv32ui suite
 #   make test-stress  same, with random bus wait states
+#   make lockstep  compare every rv32ui test against Spike, instruction by instruction
 #   make clean
 
 VERILATOR    ?= verilator
@@ -43,7 +44,7 @@ UI_BINS   := $(UI_ELFS:.elf=.bin)
 
 # ----------------------------------------------------------------------
 
-.PHONY: all lint unit sim tests test test-stress clean
+.PHONY: all lint unit sim tests test test-stress lockstep clean
 
 all: lint unit sim tests
 
@@ -89,6 +90,9 @@ test: sim tests
 
 test-stress: sim tests
 	scripts/run_tests.sh rv32ui --random-wait --seed 7
+
+lockstep: sim tests
+	python3 scripts/lockstep.py $(UI_ELFS)
 
 clean:
 	rm -rf $(BUILD)

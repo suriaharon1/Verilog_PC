@@ -1,13 +1,16 @@
 // csr.v
 // Machine-mode CSR file and trap state.
 //
-// M1 scope: the minimum the riscv-tests environment needs (mtvec, mepc,
+// Current scope: the minimum the riscv-tests environment needs (mtvec, mepc,
 // mcause, mtval, mstatus.MIE/MPIE, mscratch, counters, ID registers).
 // The core is M-mode only, so mstatus.MPP is hardwired to 11.
 //
-// TODO(M4): unimplemented CSRs currently read as zero and ignore writes.
-// M4 changes them to raise an illegal instruction trap, adds mip/mie
-// interrupt wiring, and connects `time` to the CLINT's mtime.
+// `valid` is low for any CSR address that does not exist on this core; the
+// core turns that into an illegal instruction trap, as the spec requires.
+// Some CSRs exist but are read-only zero: PMP (zero regions implemented),
+// mstatush, mconfigptr, and the unused hardware performance counters.
+//
+// TODO(M4): mip/mie interrupt wiring, and connect `time` to the CLINT's mtime.
 
 `default_nettype none
 
@@ -21,6 +24,7 @@ module csr (
     input  wire [1:0]  op,         // funct3[1:0]: 01 write, 10 set, 11 clear
     input  wire [31:0] wsrc,       // rs1 value or zero-extended uimm
     output reg  [31:0] rdata,
+    output reg         valid,      // addr names a CSR that exists
 
     // Trap entry and return
     input  wire        trap,
@@ -40,6 +44,7 @@ module csr (
     localparam [11:0] CSR_MSTATUS   = 12'h300;
     localparam [11:0] CSR_MISA      = 12'h301;
     localparam [11:0] CSR_MIE       = 12'h304;
+    localparam [11:0] CSR_MSTATUSH  = 12'h310;
     localparam [11:0] CSR_MTVEC     = 12'h305;
     localparam [11:0] CSR_MSCRATCH  = 12'h340;
     localparam [11:0] CSR_MEPC      = 12'h341;
@@ -60,6 +65,7 @@ module csr (
     localparam [11:0] CSR_MARCHID   = 12'hF12;
     localparam [11:0] CSR_MIMPID    = 12'hF13;
     localparam [11:0] CSR_MHARTID   = 12'hF14;
+    localparam [11:0] CSR_MCONFIGPTR = 12'hF15;
 
     // misa: MXL = 1 (32-bit), extension I (bit 8). Bits for M and A are set
     // when those extensions land.
@@ -83,8 +89,15 @@ module csr (
     assign mtvec_o = {mtvec_base, 2'b00};
     assign mepc_o  = {mepc_r, 2'b00};
 
+    // Read-only-zero ranges that must still exist
+    wire is_pmp      = (addr >= 12'h3A0) && (addr <= 12'h3EF);   // pmpcfg0-15, pmpaddr0-63
+    wire is_mhpm_evt = (addr >= 12'h323) && (addr <= 12'h33F);   // mhpmevent3-31
+    wire is_mhpm_cnt = ((addr >= 12'hB03) && (addr <= 12'hB1F)) ||
+                       ((addr >= 12'hB83) && (addr <= 12'hB9F)); // mhpmcounter3-31(h)
+
     // Read mux
     always @(*) begin
+        valid = 1'b1;
         case (addr)
             CSR_MSTATUS:   rdata = mstatus;
             CSR_MISA:      rdata = MISA_VALUE;
@@ -108,8 +121,13 @@ module csr (
             CSR_MVENDORID,
             CSR_MARCHID,
             CSR_MIMPID,
-            CSR_MHARTID:   rdata = 32'd0;
-            default:       rdata = 32'd0;
+            CSR_MHARTID,
+            CSR_MCONFIGPTR,
+            CSR_MSTATUSH:  rdata = 32'd0;
+            default: begin
+                rdata = 32'd0;
+                valid = is_pmp || is_mhpm_evt || is_mhpm_cnt;
+            end
         endcase
     end
 

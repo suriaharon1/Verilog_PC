@@ -43,7 +43,12 @@ module core_top #(
     output wire        trace_trap,
     output wire        trace_rd_we,
     output wire [4:0]  trace_rd,
-    output wire [31:0] trace_rd_wdata
+    output wire [31:0] trace_rd_wdata,
+    output wire        trace_mem_valid,   // instruction was a load or store
+    output wire        trace_mem_store,
+    output wire [1:0]  trace_mem_size,    // 00 byte, 01 half, 10 word
+    output wire [31:0] trace_mem_addr,    // architectural (byte) address
+    output wire [31:0] trace_mem_wdata    // store data, masked to the access size
 );
 
     localparam [1:0] S_FETCH = 2'd0;
@@ -153,12 +158,16 @@ module core_top #(
     // ------------------------------------------------------------------
     // Exceptions
     // ------------------------------------------------------------------
-    wire exception = illegal || is_ecall || is_ebreak || target_misaligned;
+    wire        csr_valid;
+    wire        illegal_csr = is_csr && !csr_valid;    // CSR does not exist
+    wire        illegal_any = illegal || illegal_csr;
+
+    wire exception = illegal_any || is_ecall || is_ebreak || target_misaligned;
 
     reg [31:0] exc_cause;
     reg [31:0] exc_tval;
     always @(*) begin
-        if (illegal) begin
+        if (illegal_any) begin
             exc_cause = `CAUSE_ILLEGAL_INSN;
             exc_tval  = ir;
         end
@@ -195,6 +204,7 @@ module core_top #(
         .op         (funct3[1:0]),
         .wsrc       (funct3[2] ? imm : rs1_val),
         .rdata      (csr_rdata),
+        .valid      (csr_valid),
         .trap       (trap_take),
         .trap_cause (exc_cause),
         .trap_pc    (pc[31:2]),
@@ -334,6 +344,13 @@ module core_top #(
     assign trace_rd_we    = rf_we && (rd != 5'd0);
     assign trace_rd       = rd;
     assign trace_rd_wdata = rf_wdata;
+
+    assign trace_mem_valid = in_mem && lsu_done;
+    assign trace_mem_store = is_store;
+    assign trace_mem_size  = funct3[1:0];
+    assign trace_mem_addr  = alu_y;
+    assign trace_mem_wdata = (funct3[1:0] == 2'b00) ? {24'd0, rs2_val[7:0]}  :
+                             (funct3[1:0] == 2'b01) ? {16'd0, rs2_val[15:0]} : rs2_val;
 
 endmodule
 

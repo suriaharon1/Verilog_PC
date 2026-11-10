@@ -10,6 +10,11 @@
 // Usage:
 //   Vcore_top <program.bin> --tohost 0xADDR [--timeout N] [--trace]
 //             [--random-wait] [--seed N] [--wave out.fst]
+//             [--commit-log out.log]
+//
+// --commit-log writes one line per retired instruction in the same format as
+// `spike --log-commits`, so scripts/lockstep.py can diff the two. Trapping
+// instructions are left out, because Spike does not log them either.
 //
 // Exit codes: 0 pass, 1 fail, 2 timeout, 3 bus error, 4 usage error.
 
@@ -40,13 +45,15 @@ struct Options
     bool random_wait = false;
     uint32_t seed = 1;
     std::string wave;
+    std::string commit_log;
 };
 
 static void usage(const char* prog)
 {
     std::fprintf(stderr,
         "usage: %s <program.bin> --tohost 0xADDR [--timeout N] [--trace]\n"
-        "          [--random-wait] [--seed N] [--wave out.fst]\n", prog);
+        "          [--random-wait] [--seed N] [--wave out.fst]\n"
+        "          [--commit-log out.log]\n", prog);
 }
 
 static bool parse_args(int argc, char** argv, Options& opt)
@@ -78,6 +85,10 @@ static bool parse_args(int argc, char** argv, Options& opt)
         else if (a == "--wave" && i + 1 < argc)
         {
             opt.wave = argv[++i];
+        }
+        else if (a == "--commit-log" && i + 1 < argc)
+        {
+            opt.commit_log = argv[++i];
         }
         else if (!a.empty() && a[0] == '+')
         {
@@ -142,6 +153,17 @@ int main(int argc, char** argv)
     if (!load_bin(opt.bin, ram))
     {
         return 4;
+    }
+
+    FILE* clog = nullptr;
+    if (!opt.commit_log.empty())
+    {
+        clog = std::fopen(opt.commit_log.c_str(), "w");
+        if (!clog)
+        {
+            std::fprintf(stderr, "error: cannot write %s\n", opt.commit_log.c_str());
+            return 4;
+        }
     }
 
     std::mt19937 rng(opt.seed);
@@ -259,6 +281,25 @@ int main(int argc, char** argv)
                 }
                 std::printf("\n");
             }
+            if (clog && !top->trace_trap)
+            {
+                // Spike format: core   0: <priv> 0x<pc> (0x<insn>) [x<rd> 0x<val>] [mem 0x<addr> [0x<data>]]
+                std::fprintf(clog, "core   0: 3 0x%08x (0x%08x)", top->trace_pc, top->trace_insn);
+                if (top->trace_rd_we)
+                {
+                    std::fprintf(clog, " x%-2u 0x%08x", top->trace_rd, top->trace_rd_wdata);
+                }
+                if (top->trace_mem_valid)
+                {
+                    std::fprintf(clog, " mem 0x%08x", top->trace_mem_addr);
+                    if (top->trace_mem_store)
+                    {
+                        int digits = 2 << top->trace_mem_size;   // 2, 4, or 8 hex digits
+                        std::fprintf(clog, " 0x%0*x", digits, top->trace_mem_wdata);
+                    }
+                }
+                std::fprintf(clog, "\n");
+            }
         }
 
         // Rising edge.
@@ -276,6 +317,10 @@ int main(int argc, char** argv)
     if (tfp)
     {
         tfp->close();
+    }
+    if (clog)
+    {
+        std::fclose(clog);
     }
     top->final();
 
