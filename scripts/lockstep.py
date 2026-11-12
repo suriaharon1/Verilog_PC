@@ -31,9 +31,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SIM = os.path.join(ROOT, "build", "sim", "Vcore_top")
 # Must describe exactly what the core implements:
+#   m       multiply/divide
 #   zicntr  cycle/time/instret counters
 #   zicclsm misaligned loads/stores handled in hardware
-DEFAULT_ISA = "rv32i_zicsr_zicntr_zifencei_zicclsm"
+DEFAULT_ISA = "rv32im_zicsr_zicntr_zifencei_zicclsm"
 RAM_BASE = 0x80000000
 
 LINE_RE = re.compile(r"^core\s+\d+:\s+\d+\s+0x([0-9a-f]+)\s+\(0x([0-9a-f]+)\)(.*)$")

@@ -36,10 +36,11 @@
 `define A_ZERO 2'd2
 
 // Writeback select
-`define WB_ALU  2'd0
-`define WB_PC4  2'd1
-`define WB_CSR  2'd2
-`define WB_LOAD 2'd3
+`define WB_ALU    3'd0
+`define WB_PC4    3'd1
+`define WB_CSR    3'd2
+`define WB_LOAD   3'd3
+`define WB_MULDIV 3'd4
 
 // Exception cause codes (mcause, interrupt bit clear)
 `define CAUSE_MISALIGNED_FETCH 32'd0

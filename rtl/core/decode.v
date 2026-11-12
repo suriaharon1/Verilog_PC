@@ -1,5 +1,5 @@
 // decode.v
-// Instruction decoder for RV32I plus Zicsr, Zifencei, and the M-mode
+// Instruction decoder for RV32IM plus Zicsr, Zifencei, and the M-mode
 // system instructions (ecall, ebreak, mret, wfi).
 //
 // Purely combinational. Any encoding not listed here sets `illegal`, and the
@@ -25,13 +25,14 @@ module decode (
     output reg  [3:0]  alu_op,
     output reg  [1:0]  alu_a_sel,
     output reg         alu_b_imm,
-    output reg  [1:0]  wb_sel,
+    output reg  [2:0]  wb_sel,
     output reg         reg_write,
 
     // Instruction class
     output reg         is_load,
     output reg         is_store,
     output reg         is_branch,
+    output reg         is_muldiv,
     output reg         is_jal,
     output reg         is_jalr,
     output reg         is_csr,
@@ -69,6 +70,7 @@ module decode (
         is_load   = 1'b0;
         is_store  = 1'b0;
         is_branch = 1'b0;
+        is_muldiv = 1'b0;
         is_jal    = 1'b0;
         is_jalr   = 1'b0;
         is_csr    = 1'b0;
@@ -151,10 +153,16 @@ module decode (
             `OPC_OP: begin
                 reg_write = 1'b1;
                 alu_op    = {funct7[5], funct3};
-                // funct7 = 0000000: all eight ops. funct7 = 0100000: sub, sra only.
-                // funct7 = 0000001 (M extension) is added in M2.
-                illegal   = !((funct7 == 7'b0000000) ||
-                              ((funct7 == 7'b0100000) && ((funct3 == 3'b000) || (funct3 == 3'b101))));
+                if (funct7 == 7'b0000001) begin
+                    // M extension: mul, mulh, mulhsu, mulhu, div, divu, rem, remu
+                    is_muldiv = 1'b1;
+                    wb_sel    = `WB_MULDIV;
+                end
+                else begin
+                    // funct7 = 0000000: all eight ops. funct7 = 0100000: sub, sra only.
+                    illegal = !((funct7 == 7'b0000000) ||
+                                ((funct7 == 7'b0100000) && ((funct3 == 3'b000) || (funct3 == 3'b101))));
+                end
             end
 
             `OPC_MISC_MEM: begin

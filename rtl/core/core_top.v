@@ -1,5 +1,5 @@
 // core_top.v
-// Multi-cycle RV32I core (plus Zicsr, Zifencei, and basic M-mode traps).
+// Multi-cycle RV32IM core (plus Zicsr, Zifencei, and basic M-mode traps).
 //
 // State machine:
 //
@@ -9,6 +9,8 @@
 //           Traps and mret also resolve here.
 //   MEM   : the LSU runs one or two bus transactions. On done, loads write
 //           rd and pc advances.
+//   MULDIV: the multiply/divide unit runs (2 cycles for multiply, 34 for
+//           divide). On done, rd is written and pc advances.
 //
 // Fetch and data share one bus port (von Neumann). That keeps fence.i
 // trivially correct and maps directly onto a single Wishbone master later.
@@ -53,7 +55,8 @@ module core_top #(
 
     localparam [1:0] S_FETCH = 2'd0;
     localparam [1:0] S_EXEC  = 2'd1;
-    localparam [1:0] S_MEM   = 2'd2;
+    localparam [1:0] S_MEM    = 2'd2;
+    localparam [1:0] S_MULDIV = 2'd3;
 
     reg [1:0]  state;
     reg [31:0] pc;
@@ -61,7 +64,8 @@ module core_top #(
 
     wire in_fetch = (state == S_FETCH);
     wire in_exec  = (state == S_EXEC);
-    wire in_mem   = (state == S_MEM);
+    wire in_mem    = (state == S_MEM);
+    wire in_muldiv = (state == S_MULDIV);
 
     // ------------------------------------------------------------------
     // Decode
@@ -73,9 +77,9 @@ module core_top #(
     wire [3:0]  alu_op;
     wire [1:0]  alu_a_sel;
     wire        alu_b_imm;
-    wire [1:0]  wb_sel;
+    wire [2:0]  wb_sel;
     wire        reg_write;
-    wire        is_load, is_store, is_branch, is_jal, is_jalr;
+    wire        is_load, is_store, is_branch, is_muldiv, is_jal, is_jalr;
     wire        is_csr, csr_write, is_ecall, is_ebreak, is_mret, illegal;
 
     decode u_decode (
@@ -94,6 +98,7 @@ module core_top #(
         .is_load   (is_load),
         .is_store  (is_store),
         .is_branch (is_branch),
+        .is_muldiv (is_muldiv),
         .is_jal    (is_jal),
         .is_jalr   (is_jalr),
         .is_csr    (is_csr),
@@ -188,6 +193,7 @@ module core_top #(
     wire trap_take = in_exec && exception;
     wire mret_take = in_exec && !exception && is_mret;
     wire go_mem    = in_exec && !exception && (is_load || is_store);
+    wire go_muldiv = in_exec && !exception && is_muldiv;
 
     // ------------------------------------------------------------------
     // CSR file
@@ -244,6 +250,23 @@ module core_top #(
     );
 
     // ------------------------------------------------------------------
+    // Multiply/divide unit
+    // ------------------------------------------------------------------
+    wire        md_done;
+    wire [31:0] md_result;
+
+    muldiv u_muldiv (
+        .clk    (clk),
+        .rst    (rst),
+        .req    (in_muldiv),
+        .op     (funct3),
+        .a      (rs1_val),
+        .b      (rs2_val),
+        .done   (md_done),
+        .result (md_result)
+    );
+
+    // ------------------------------------------------------------------
     // Bus mux: fetch owns the bus in FETCH, the LSU in MEM.
     // ------------------------------------------------------------------
     assign mem_valid = in_fetch || lsu_valid;
@@ -254,17 +277,19 @@ module core_top #(
     // ------------------------------------------------------------------
     // Writeback
     // ------------------------------------------------------------------
-    wire exec_wb = in_exec && !exception && reg_write && !is_load;
-    wire mem_wb  = in_mem && lsu_done && is_load;
+    wire exec_wb   = in_exec && !exception && reg_write && !is_load && !is_muldiv;
+    wire mem_wb    = in_mem && lsu_done && is_load;
+    wire muldiv_wb = in_muldiv && md_done;
 
-    assign rf_we = exec_wb || mem_wb;
+    assign rf_we = exec_wb || mem_wb || muldiv_wb;
 
     reg [31:0] wb_data;
     always @(*) begin
         case (wb_sel)
             `WB_PC4:  wb_data = pc_plus4;
             `WB_CSR:  wb_data = csr_rdata;
-            `WB_LOAD: wb_data = lsu_rdata;
+            `WB_LOAD:   wb_data = lsu_rdata;
+            `WB_MULDIV: wb_data = md_result;
             default:  wb_data = alu_y;
         endcase
     end
@@ -311,6 +336,9 @@ module core_top #(
                     if (go_mem) begin
                         state <= S_MEM;
                     end
+                    else if (go_muldiv) begin
+                        state <= S_MULDIV;
+                    end
                     else begin
                         pc    <= next_pc;
                         state <= S_FETCH;
@@ -319,6 +347,13 @@ module core_top #(
 
                 S_MEM: begin
                     if (lsu_done) begin
+                        pc    <= pc_plus4;
+                        state <= S_FETCH;
+                    end
+                end
+
+                S_MULDIV: begin
+                    if (md_done) begin
                         pc    <= pc_plus4;
                         state <= S_FETCH;
                     end
@@ -334,10 +369,11 @@ module core_top #(
     // ------------------------------------------------------------------
     // Retirement trace
     // ------------------------------------------------------------------
-    wire exec_done = in_exec && !go_mem;     // includes trapping instructions
+    wire exec_done = in_exec && !go_mem && !go_muldiv;   // includes trapping instructions
+    wire unit_done = (in_mem && lsu_done) || (in_muldiv && md_done);
 
-    assign retire_ok      = (exec_done && !exception) || (in_mem && lsu_done);
-    assign trace_valid    = exec_done || (in_mem && lsu_done);
+    assign retire_ok      = (exec_done && !exception) || unit_done;
+    assign trace_valid    = exec_done || unit_done;
     assign trace_pc       = pc;
     assign trace_insn     = ir;
     assign trace_trap     = in_exec && exception;
