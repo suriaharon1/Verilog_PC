@@ -1,5 +1,5 @@
 // decode.v
-// Instruction decoder for RV32IM plus Zicsr, Zifencei, and the M-mode
+// Instruction decoder for RV32IMA plus Zicsr, Zifencei, and the M-mode
 // system instructions (ecall, ebreak, mret, wfi).
 //
 // Purely combinational. Any encoding not listed here sets `illegal`, and the
@@ -33,6 +33,10 @@ module decode (
     output reg         is_store,
     output reg         is_branch,
     output reg         is_muldiv,
+    output reg         is_lr,
+    output reg         is_sc,
+    output reg         is_amo,
+    output wire [4:0]  amo_funct5,
     output reg         is_jal,
     output reg         is_jalr,
     output reg         is_csr,
@@ -45,12 +49,14 @@ module decode (
 
     wire [6:0] opcode = instr[6:0];
     wire [6:0] funct7 = instr[31:25];
+    wire [4:0] funct5 = instr[31:27];      // A extension; bits 26:25 are aq/rl
 
     assign rs1      = instr[19:15];
     assign rs2      = instr[24:20];
     assign rd       = instr[11:7];
     assign funct3   = instr[14:12];
     assign csr_addr = instr[31:20];
+    assign amo_funct5 = funct5;
 
     // Immediate formats
     wire [31:0] imm_i = {{20{instr[31]}}, instr[31:20]};
@@ -71,6 +77,9 @@ module decode (
         is_store  = 1'b0;
         is_branch = 1'b0;
         is_muldiv = 1'b0;
+        is_lr     = 1'b0;
+        is_sc     = 1'b0;
+        is_amo    = 1'b0;
         is_jal    = 1'b0;
         is_jalr   = 1'b0;
         is_csr    = 1'b0;
@@ -162,6 +171,40 @@ module decode (
                     // funct7 = 0000000: all eight ops. funct7 = 0100000: sub, sra only.
                     illegal = !((funct7 == 7'b0000000) ||
                                 ((funct7 == 7'b0100000) && ((funct3 == 3'b000) || (funct3 == 3'b101))));
+                end
+            end
+
+            `OPC_AMO: begin
+                // A extension, word ops only (funct3 = 010). The address is
+                // rs1 with no offset: imm stays 0, so the ALU gives rs1 + 0.
+                // aq/rl (bits 26:25) are ignored: one in-order hart with no
+                // caches already performs every access in program order.
+                alu_b_imm = 1'b1;
+                reg_write = 1'b1;
+                case (funct5)
+                    5'b00010: begin                              // lr.w
+                        is_lr   = 1'b1;
+                        is_load = 1'b1;
+                        wb_sel  = `WB_LOAD;
+                        illegal = (rs2 != 5'd0);
+                    end
+                    5'b00011: begin                              // sc.w
+                        is_sc    = 1'b1;
+                        is_store = 1'b1;
+                        wb_sel   = `WB_SC;
+                    end
+                    5'b00000, 5'b00001, 5'b00100, 5'b01100, 5'b01000,
+                    5'b10000, 5'b10100, 5'b11000, 5'b11100: begin  // amo*.w
+                        is_amo  = 1'b1;
+                        is_load = 1'b1;                          // rd gets the old value
+                        wb_sel  = `WB_LOAD;
+                    end
+                    default: begin
+                        illegal = 1'b1;
+                    end
+                endcase
+                if (funct3 != 3'b010) begin
+                    illegal = 1'b1;
                 end
             end
 

@@ -284,12 +284,18 @@ int main(int argc, char** argv)
             if (clog && !top->trace_trap)
             {
                 // Spike format: core   0: <priv> 0x<pc> (0x<insn>) [x<rd> 0x<val>] [mem 0x<addr> [0x<data>]]
+                // An AMO logs two memory fields: the read, then the write.
                 std::fprintf(clog, "core   0: 3 0x%08x (0x%08x)", top->trace_pc, top->trace_insn);
                 if (top->trace_rd_we)
                 {
                     std::fprintf(clog, " x%-2u 0x%08x", top->trace_rd, top->trace_rd_wdata);
                 }
-                if (top->trace_mem_valid)
+                if (top->trace_mem_valid && top->trace_mem_amo)
+                {
+                    std::fprintf(clog, " mem 0x%08x mem 0x%08x 0x%08x", top->trace_mem_addr,
+                                 top->trace_mem_addr, top->trace_mem_wdata);
+                }
+                else if (top->trace_mem_valid)
                 {
                     std::fprintf(clog, " mem 0x%08x", top->trace_mem_addr);
                     if (top->trace_mem_store)

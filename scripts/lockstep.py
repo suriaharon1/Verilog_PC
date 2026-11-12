@@ -32,9 +32,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SIM = os.path.join(ROOT, "build", "sim", "Vcore_top")
 # Must describe exactly what the core implements:
 #   m       multiply/divide
+#   a       atomics (lr/sc, amo*)
 #   zicntr  cycle/time/instret counters
 #   zicclsm misaligned loads/stores handled in hardware
-DEFAULT_ISA = "rv32im_zicsr_zicntr_zifencei_zicclsm"
+DEFAULT_ISA = "rv32ima_zicsr_zicntr_zifencei_zicclsm"
 RAM_BASE = 0x80000000
 
 LINE_RE = re.compile(r"^core\s+\d+:\s+\d+\s+0x([0-9a-f]+)\s+\(0x([0-9a-f]+)\)(.*)$")
@@ -45,15 +46,14 @@ MEM_RE = re.compile(r"\bmem\s+0x([0-9a-f]+)(?:\s+0x([0-9a-f]+))?")
 class Commit:
     """One retired instruction, parsed from a Spike-format log line."""
 
-    __slots__ = ("pc", "insn", "rd", "rd_val", "mem_addr", "mem_data", "text")
+    __slots__ = ("pc", "insn", "rd", "rd_val", "mems", "text")
 
-    def __init__(self, pc, insn, rd, rd_val, mem_addr, mem_data, text):
+    def __init__(self, pc, insn, rd, rd_val, mems, text):
         self.pc = pc
         self.insn = insn
         self.rd = rd
         self.rd_val = rd_val
-        self.mem_addr = mem_addr
-        self.mem_data = mem_data
+        self.mems = mems        # tuple of (addr, data or None); an AMO has two
         self.text = text
 
 
@@ -64,17 +64,13 @@ def parse_line(line):
     pc = int(m.group(1), 16)
     insn = int(m.group(2), 16)
     rest = m.group(3)
-    rd = rd_val = mem_addr = mem_data = None
+    rd = rd_val = None
     r = REG_RE.search(rest)
     if r:
         rd = int(r.group(1))
         rd_val = int(r.group(2), 16)
-    mm = MEM_RE.search(rest)
-    if mm:
-        mem_addr = int(mm.group(1), 16)
-        if mm.group(2) is not None:
-            mem_data = int(mm.group(2), 16)
-    return Commit(pc, insn, rd, rd_val, mem_addr, mem_data, line.rstrip("\n"))
+    mems = tuple((int(a, 16), int(d, 16) if d else None) for a, d in MEM_RE.findall(rest))
+    return Commit(pc, insn, rd, rd_val, mems, line.rstrip("\n"))
 
 
 def is_counter_read(insn):
@@ -87,7 +83,7 @@ def is_counter_read(insn):
 
 
 def is_tohost_store(c, tohost):
-    return c.mem_addr == tohost and c.mem_data is not None and c.mem_data != 0
+    return any(addr == tohost and data not in (None, 0) for addr, data in c.mems)
 
 
 def find_tohost(elf):
@@ -152,19 +148,20 @@ def describe_diff(a, b):
     if (a.rd, a.rd_val) != (b.rd, b.rd_val):
         fmt = lambda c: "none" if c.rd is None else "x%d = 0x%08x" % (c.rd, c.rd_val)
         diffs.append("register write: core %s, spike %s" % (fmt(a), fmt(b)))
-    if a.mem_addr != b.mem_addr:
-        fmt = lambda v: "none" if v is None else "0x%08x" % v
-        diffs.append("memory address: core %s, spike %s" % (fmt(a.mem_addr), fmt(b.mem_addr)))
-    if a.mem_data != b.mem_data:
-        fmt = lambda v: "none" if v is None else "0x%x" % v
-        diffs.append("store data: core %s, spike %s" % (fmt(a.mem_data), fmt(b.mem_data)))
+    if a.mems != b.mems:
+        def fmt(mems):
+            if not mems:
+                return "none"
+            return ", ".join("0x%08x" % addr + ("" if data is None else " <= 0x%x" % data)
+                             for addr, data in mems)
+        diffs.append("memory access: core %s; spike %s" % (fmt(a.mems), fmt(b.mems)))
     return diffs
 
 
 def commits_match(a, b):
     if a.pc != b.pc or a.insn != b.insn:
         return False
-    if a.mem_addr != b.mem_addr or a.mem_data != b.mem_data:
+    if a.mems != b.mems:
         return False
     if a.rd != b.rd:
         return False

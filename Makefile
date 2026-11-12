@@ -4,7 +4,7 @@
 #   make unit      build and run module unit tests
 #   make sim       build the core testbench (build/sim/Vcore_top)
 #   make tests     build the riscv-tests (ELF + flat binary) for every suite
-#   make test      run every suite (rv32ui, rv32um)
+#   make test      run every suite (rv32ui, rv32um, rv32ua, custom)
 #   make test-stress  same, with random bus wait states
 #   make lockstep  compare every test against Spike, instruction by instruction
 #   make clean
@@ -36,17 +36,23 @@ RVTESTS   := tests/riscv-tests
 RV_ABI    := -mabi=ilp32
 UI_MARCH  := -march=rv32i_zicsr_zifencei
 UM_MARCH  := -march=rv32im_zicsr_zifencei
+UA_MARCH  := -march=rv32ima_zicsr_zifencei
 RV_TFLAGS := -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
              -I$(RVTESTS)/env/p -I$(RVTESTS)/isa/macros/scalar -T$(RVTESTS)/env/p/link.ld
 
 include $(RVTESTS)/isa/rv32ui/Makefrag
 include $(RVTESTS)/isa/rv32um/Makefrag
+include $(RVTESTS)/isa/rv32ua/Makefrag
 
-SUITES    := rv32ui rv32um
+SUITES    := rv32ui rv32um rv32ua custom
 TEST_DIR  := $(BUILD)/tests
 UI_ELFS   := $(addprefix $(TEST_DIR)/rv32ui-p-,$(addsuffix .elf,$(rv32ui_sc_tests)))
 UM_ELFS   := $(addprefix $(TEST_DIR)/rv32um-p-,$(addsuffix .elf,$(rv32um_sc_tests)))
-ALL_ELFS  := $(UI_ELFS) $(UM_ELFS)
+UA_ELFS   := $(addprefix $(TEST_DIR)/rv32ua-p-,$(addsuffix .elf,$(rv32ua_sc_tests)))
+# Our own tests (tests/custom/*.S), built against the same riscv-tests env
+CUSTOM_DIR := tests/custom
+CU_ELFS   := $(patsubst $(CUSTOM_DIR)/%.S,$(TEST_DIR)/custom-p-%.elf,$(wildcard $(CUSTOM_DIR)/*.S))
+ALL_ELFS  := $(UI_ELFS) $(UM_ELFS) $(UA_ELFS) $(CU_ELFS)
 ALL_BINS  := $(ALL_ELFS:.elf=.bin)
 
 # ----------------------------------------------------------------------
@@ -59,7 +65,7 @@ lint:
 	$(VERILATOR) --lint-only $(VFLAGS) --top-module core_top $(CORE_SRCS)
 
 # Unit tests: one Verilator build per module under test
-UNIT_MODULES := alu regfile muldiv
+UNIT_MODULES := alu regfile muldiv amo_alu
 
 define unit_template
 $(BUILD)/unit/$(1)/V$(1): $(CORE_DIR)/$(1).v sim/unit/tb_$(1).cpp $(CORE_HDRS)
@@ -90,6 +96,14 @@ $(TEST_DIR)/rv32ui-p-%.elf: $(RVTESTS)/isa/rv32ui/%.S
 $(TEST_DIR)/rv32um-p-%.elf: $(RVTESTS)/isa/rv32um/%.S
 	@mkdir -p $(@D)
 	$(RV_GCC) $(UM_MARCH) $(RV_ABI) $(RV_TFLAGS) $< -o $@
+
+$(TEST_DIR)/rv32ua-p-%.elf: $(RVTESTS)/isa/rv32ua/%.S
+	@mkdir -p $(@D)
+	$(RV_GCC) $(UA_MARCH) $(RV_ABI) $(RV_TFLAGS) $< -o $@
+
+$(TEST_DIR)/custom-p-%.elf: $(CUSTOM_DIR)/%.S
+	@mkdir -p $(@D)
+	$(RV_GCC) $(UA_MARCH) $(RV_ABI) $(RV_TFLAGS) $< -o $@
 
 $(TEST_DIR)/%.bin: $(TEST_DIR)/%.elf
 	$(RV_OBJCOPY) -O binary $< $@

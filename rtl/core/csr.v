@@ -67,9 +67,8 @@ module csr (
     localparam [11:0] CSR_MHARTID   = 12'hF14;
     localparam [11:0] CSR_MCONFIGPTR = 12'hF15;
 
-    // misa: MXL = 1 (32-bit), extensions I (bit 8) and M (bit 12).
-    // The A bit (0) is set when atomics land.
-    localparam [31:0] MISA_VALUE = 32'h4000_1100;
+    // misa: MXL = 1 (32-bit), extensions A (bit 0), I (bit 8), M (bit 12).
+    localparam [31:0] MISA_VALUE = 32'h4000_1101;
 
     // State
     reg        mstatus_mie;

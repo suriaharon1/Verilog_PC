@@ -1,5 +1,5 @@
 // core_top.v
-// Multi-cycle RV32IM core (plus Zicsr, Zifencei, and basic M-mode traps).
+// Multi-cycle RV32IMA core (plus Zicsr, Zifencei, and basic M-mode traps).
 //
 // State machine:
 //
@@ -7,13 +7,19 @@
 //   EXEC  : decode, read registers, run the ALU/branch unit, and either
 //           finish the instruction (write rd, update pc) or go to MEM.
 //           Traps and mret also resolve here.
-//   MEM   : the LSU runs one or two bus transactions. On done, loads write
-//           rd and pc advances.
+//   MEM   : the LSU runs one or two bus transactions (an AMO is always two:
+//           read, then write). On done, loads/AMOs write rd and pc advances.
 //   MULDIV: the multiply/divide unit runs (2 cycles for multiply, 34 for
 //           divide). On done, rd is written and pc advances.
 //
 // Fetch and data share one bus port (von Neumann). That keeps fence.i
 // trivially correct and maps directly onto a single Wishbone master later.
+//
+// Atomics (A extension): LR sets a one-word reservation; SC succeeds only if
+// the reservation is still valid for that word. Every SC clears it, and so
+// does every trap and mret. A failing SC finishes in EXEC with no memory
+// access. AMOs are read-modify-write in the LSU. A single in-order hart with
+// no caches needs nothing else for atomicity.
 //
 // Bus protocol: the core drives mem_valid with stable addr/wdata/wstrb until
 // it sees mem_ready high on a rising edge. wstrb == 0 means a read.
@@ -48,6 +54,7 @@ module core_top #(
     output wire [31:0] trace_rd_wdata,
     output wire        trace_mem_valid,   // instruction was a load or store
     output wire        trace_mem_store,
+    output wire        trace_mem_amo,     // read-modify-write: wdata is the new value
     output wire [1:0]  trace_mem_size,    // 00 byte, 01 half, 10 word
     output wire [31:0] trace_mem_addr,    // architectural (byte) address
     output wire [31:0] trace_mem_wdata    // store data, masked to the access size
@@ -80,6 +87,8 @@ module core_top #(
     wire [2:0]  wb_sel;
     wire        reg_write;
     wire        is_load, is_store, is_branch, is_muldiv, is_jal, is_jalr;
+    wire        is_lr, is_sc, is_amo;
+    wire [4:0]  amo_funct5;
     wire        is_csr, csr_write, is_ecall, is_ebreak, is_mret, illegal;
 
     decode u_decode (
@@ -99,6 +108,10 @@ module core_top #(
         .is_store  (is_store),
         .is_branch (is_branch),
         .is_muldiv (is_muldiv),
+        .is_lr     (is_lr),
+        .is_sc     (is_sc),
+        .is_amo    (is_amo),
+        .amo_funct5(amo_funct5),
         .is_jal    (is_jal),
         .is_jalr   (is_jalr),
         .is_csr    (is_csr),
@@ -161,13 +174,30 @@ module core_top #(
     wire        target_misaligned = jump && jump_target[1];
 
     // ------------------------------------------------------------------
+    // Atomics: reservation for LR/SC
+    // ------------------------------------------------------------------
+    reg         resv_valid;
+    reg  [29:0] resv_addr;      // word address (reservation granule = 1 word)
+
+    wire        is_atomic = is_lr || is_sc || is_amo;
+    // Atomics must be naturally aligned (word). Misaligned ones trap instead
+    // of being split, because a split access cannot be atomic. The spec
+    // allows either an address-misaligned or an access-fault exception; this
+    // core raises access fault (as Spike does), which tells software the
+    // access must not be emulated. Ordinary misaligned loads/stores are
+    // handled in hardware, so a misaligned-address trap could invite a
+    // handler to emulate the atomic non-atomically.
+    wire        atomic_misaligned = is_atomic && (alu_y[1:0] != 2'b00);
+    wire        sc_fail = is_sc && !(resv_valid && (resv_addr == alu_y[31:2]));
+
+    // ------------------------------------------------------------------
     // Exceptions
     // ------------------------------------------------------------------
     wire        csr_valid;
     wire        illegal_csr = is_csr && !csr_valid;    // CSR does not exist
     wire        illegal_any = illegal || illegal_csr;
 
-    wire exception = illegal_any || is_ecall || is_ebreak || target_misaligned;
+    wire exception = illegal_any || is_ecall || is_ebreak || atomic_misaligned || target_misaligned;
 
     reg [31:0] exc_cause;
     reg [31:0] exc_tval;
@@ -184,6 +214,10 @@ module core_top #(
             exc_cause = `CAUSE_BREAKPOINT;
             exc_tval  = pc;
         end
+        else if (atomic_misaligned) begin
+            exc_cause = is_lr ? `CAUSE_LOAD_ACCESS_FAULT : `CAUSE_STORE_ACCESS_FAULT;
+            exc_tval  = alu_y;
+        end
         else begin
             exc_cause = `CAUSE_MISALIGNED_FETCH;
             exc_tval  = jump_target;
@@ -192,7 +226,8 @@ module core_top #(
 
     wire trap_take = in_exec && exception;
     wire mret_take = in_exec && !exception && is_mret;
-    wire go_mem    = in_exec && !exception && (is_load || is_store);
+    // A failing SC never touches memory: it finishes in EXEC with rd = 1.
+    wire go_mem    = in_exec && !exception && (is_load || (is_store && !sc_fail));
     wire go_muldiv = in_exec && !exception && is_muldiv;
 
     // ------------------------------------------------------------------
@@ -229,6 +264,7 @@ module core_top #(
     wire        lsu_valid;
     wire [31:0] lsu_addr, lsu_wdata;
     wire [3:0]  lsu_wstrb;
+    wire [31:0] lsu_amo_wdata;
 
     lsu u_lsu (
         .clk         (clk),
@@ -239,8 +275,11 @@ module core_top #(
         .wdata       (rs2_val),
         .size        (funct3[1:0]),
         .is_unsigned (funct3[2]),
+        .is_amo      (is_amo),
+        .amo_funct5  (amo_funct5),
         .done        (lsu_done),
         .rdata       (lsu_rdata),
+        .amo_wdata   (lsu_amo_wdata),
         .mem_valid   (lsu_valid),
         .mem_addr    (lsu_addr),
         .mem_wdata   (lsu_wdata),
@@ -277,9 +316,12 @@ module core_top #(
     // ------------------------------------------------------------------
     // Writeback
     // ------------------------------------------------------------------
-    wire exec_wb   = in_exec && !exception && reg_write && !is_load && !is_muldiv;
-    wire mem_wb    = in_mem && lsu_done && is_load;
-    wire muldiv_wb = in_muldiv && md_done;
+    // Each instruction writes rd in the cycle it finishes: EXEC for most,
+    // MEM for loads/LR/AMOs/successful SC, MULDIV for mul/div.
+    wire exec_finish = in_exec && !exception && !go_mem && !go_muldiv;
+    wire exec_wb     = exec_finish && reg_write;
+    wire mem_wb      = in_mem && lsu_done && reg_write;
+    wire muldiv_wb   = in_muldiv && md_done;
 
     assign rf_we = exec_wb || mem_wb || muldiv_wb;
 
@@ -290,6 +332,8 @@ module core_top #(
             `WB_CSR:  wb_data = csr_rdata;
             `WB_LOAD:   wb_data = lsu_rdata;
             `WB_MULDIV: wb_data = md_result;
+            // SC: rd = 0 on success (finishes in MEM), 1 on failure (finishes in EXEC)
+            `WB_SC:     wb_data = in_mem ? 32'd0 : 32'd1;
             default:  wb_data = alu_y;
         endcase
     end
@@ -366,6 +410,24 @@ module core_top #(
         end
     end
 
+    // Reservation: set by LR, cleared by every SC, trap, and mret.
+    always @(posedge clk) begin
+        if (rst) begin
+            resv_valid <= 1'b0;
+            resv_addr  <= 30'd0;
+        end
+        else if (trap_take || mret_take) begin
+            resv_valid <= 1'b0;
+        end
+        else if (is_sc && (exec_finish || (in_mem && lsu_done))) begin
+            resv_valid <= 1'b0;
+        end
+        else if (is_lr && in_mem && lsu_done) begin
+            resv_valid <= 1'b1;
+            resv_addr  <= alu_y[31:2];
+        end
+    end
+
     // ------------------------------------------------------------------
     // Retirement trace
     // ------------------------------------------------------------------
@@ -383,9 +445,11 @@ module core_top #(
 
     assign trace_mem_valid = in_mem && lsu_done;
     assign trace_mem_store = is_store;
+    assign trace_mem_amo   = is_amo;
     assign trace_mem_size  = funct3[1:0];
     assign trace_mem_addr  = alu_y;
-    assign trace_mem_wdata = (funct3[1:0] == 2'b00) ? {24'd0, rs2_val[7:0]}  :
+    assign trace_mem_wdata = is_amo                 ? lsu_amo_wdata :
+                             (funct3[1:0] == 2'b00) ? {24'd0, rs2_val[7:0]}  :
                              (funct3[1:0] == 2'b01) ? {16'd0, rs2_val[15:0]} : rs2_val;
 
 endmodule

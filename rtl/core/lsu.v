@@ -11,6 +11,12 @@
 // data are shifted left by the byte offset into that window; load data is
 // shifted right by the same offset to come back out.
 //
+// Atomic memory operations (AMOs, M3) reuse the two-phase machinery: phase 0
+// reads the word, phase 1 writes amo_alu(old, wdata) back to the SAME word,
+// and `rdata` returns the old value. The core only sends word-aligned AMOs
+// (misaligned ones trap). LR is a plain load and SC a plain store here; the
+// reservation logic lives in the core.
+//
 // Handshake: the core holds `req` high (with stable inputs) until `done`
 // pulses for one cycle. `done` and `rdata` are valid in that same cycle.
 
@@ -27,8 +33,11 @@ module lsu (
     input  wire [31:0] wdata,
     input  wire [1:0]  size,         // 00 byte, 01 half, 10 word
     input  wire        is_unsigned,  // lbu, lhu
+    input  wire        is_amo,       // read-modify-write (word, aligned)
+    input  wire [4:0]  amo_funct5,
     output wire        done,
     output reg  [31:0] rdata,
+    output wire [31:0] amo_wdata,    // value an AMO writes (for the trace)
 
     // Bus side
     output wire        mem_valid,
@@ -48,21 +57,31 @@ module lsu (
     wire [7:0]  mask8     = {4'b0000, size_mask} << off;
     wire [63:0] wdata64   = {32'd0, wdata} << bit_off;
 
-    wire        need_second = |mask8[7:4];
+    reg         phase;       // 0: low word (or AMO read), 1: high word (or AMO write)
+    reg  [31:0] lo_word;     // low word of a split load, or the AMO's old value
 
-    reg         phase;       // 0: low word, 1: high word
-    reg  [31:0] lo_word;     // low word captured during a split load
+    // AMOs always take both phases: read, then write.
+    wire        need_second = is_amo || (|mask8[7:4]);
+    wire        last        = phase || !need_second;
 
-    wire        last = phase || !need_second;
+    amo_alu u_amo_alu (
+        .funct5 (amo_funct5),
+        .old    (lo_word),
+        .src    (wdata),
+        .result (amo_wdata)
+    );
 
     assign mem_valid = req;
-    assign mem_addr  = phase ? (base + 32'd4) : base;
-    assign mem_wdata = phase ? wdata64[63:32] : wdata64[31:0];
-    assign mem_wstrb = !is_store ? 4'b0000 :
+    assign mem_addr  = (phase && !is_amo) ? (base + 32'd4) : base;
+    assign mem_wdata = is_amo ? amo_wdata :
+                       phase  ? wdata64[63:32] : wdata64[31:0];
+    assign mem_wstrb = is_amo    ? (phase ? 4'b1111 : 4'b0000) :
+                       !is_store ? 4'b0000 :
                        phase     ? mask8[7:4] : mask8[3:0];
     assign done      = req && mem_ready && last;
 
-    // Load data path
+    // Load data path. For an AMO (aligned, phase 1) the low word is lo_word,
+    // the old value, which is what rd must receive.
     wire [63:0] rd64 = phase ? {mem_rdata, lo_word} : {32'd0, mem_rdata};
     /* verilator lint_off UNUSEDSIGNAL */
     wire [63:0] rd_shifted = rd64 >> bit_off;   // only the low 32 bits are needed

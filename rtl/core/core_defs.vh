@@ -16,6 +16,7 @@
 `define OPC_OP       7'b0110011
 `define OPC_MISC_MEM 7'b0001111
 `define OPC_SYSTEM   7'b1110011
+`define OPC_AMO      7'b0101111
 
 // ALU operations. Encoded as {funct7[5], funct3} so the decoder can pass
 // instruction bits straight through for OP and OP-IMM.
@@ -41,11 +42,14 @@
 `define WB_CSR    3'd2
 `define WB_LOAD   3'd3
 `define WB_MULDIV 3'd4
+`define WB_SC     3'd5
 
 // Exception cause codes (mcause, interrupt bit clear)
 `define CAUSE_MISALIGNED_FETCH 32'd0
 `define CAUSE_ILLEGAL_INSN     32'd2
 `define CAUSE_BREAKPOINT       32'd3
+`define CAUSE_LOAD_ACCESS_FAULT  32'd5
+`define CAUSE_STORE_ACCESS_FAULT 32'd7   // "store/AMO": also used for AMOs and SC
 `define CAUSE_MACHINE_ECALL    32'd11
 
 `endif
