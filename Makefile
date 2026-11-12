@@ -1,12 +1,12 @@
 # Verilog_PC- top-level Makefile
 #
 #   make lint      Verilator -Wall lint of the core
-#   make unit      build and run module unit tests (alu, regfile)
+#   make unit      build and run module unit tests
 #   make sim       build the core testbench (build/sim/Vcore_top)
-#   make tests     build the rv32ui riscv-tests (ELF + flat binary)
-#   make test      run the full rv32ui suite
+#   make tests     build the riscv-tests (ELF + flat binary) for every suite
+#   make test      run every suite (rv32ui, rv32um)
 #   make test-stress  same, with random bus wait states
-#   make lockstep  compare every rv32ui test against Spike, instruction by instruction
+#   make lockstep  compare every test against Spike, instruction by instruction
 #   make clean
 
 VERILATOR    ?= verilator
@@ -32,15 +32,22 @@ endif
 # riscv-tests
 # ----------------------------------------------------------------------
 RVTESTS   := tests/riscv-tests
-RV_MARCH  := -march=rv32i_zicsr_zifencei -mabi=ilp32
+# Each suite is built with only the extensions it needs.
+RV_ABI    := -mabi=ilp32
+UI_MARCH  := -march=rv32i_zicsr_zifencei
+UM_MARCH  := -march=rv32im_zicsr_zifencei
 RV_TFLAGS := -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
              -I$(RVTESTS)/env/p -I$(RVTESTS)/isa/macros/scalar -T$(RVTESTS)/env/p/link.ld
 
 include $(RVTESTS)/isa/rv32ui/Makefrag
+include $(RVTESTS)/isa/rv32um/Makefrag
 
+SUITES    := rv32ui rv32um
 TEST_DIR  := $(BUILD)/tests
 UI_ELFS   := $(addprefix $(TEST_DIR)/rv32ui-p-,$(addsuffix .elf,$(rv32ui_sc_tests)))
-UI_BINS   := $(UI_ELFS:.elf=.bin)
+UM_ELFS   := $(addprefix $(TEST_DIR)/rv32um-p-,$(addsuffix .elf,$(rv32um_sc_tests)))
+ALL_ELFS  := $(UI_ELFS) $(UM_ELFS)
+ALL_BINS  := $(ALL_ELFS:.elf=.bin)
 
 # ----------------------------------------------------------------------
 
@@ -52,7 +59,7 @@ lint:
 	$(VERILATOR) --lint-only $(VFLAGS) --top-module core_top $(CORE_SRCS)
 
 # Unit tests: one Verilator build per module under test
-UNIT_MODULES := alu regfile
+UNIT_MODULES := alu regfile muldiv
 
 define unit_template
 $(BUILD)/unit/$(1)/V$(1): $(CORE_DIR)/$(1).v sim/unit/tb_$(1).cpp $(CORE_HDRS)
@@ -78,21 +85,26 @@ sim: $(SIM)
 # riscv-tests
 $(TEST_DIR)/rv32ui-p-%.elf: $(RVTESTS)/isa/rv32ui/%.S
 	@mkdir -p $(@D)
-	$(RV_GCC) $(RV_MARCH) $(RV_TFLAGS) $< -o $@
+	$(RV_GCC) $(UI_MARCH) $(RV_ABI) $(RV_TFLAGS) $< -o $@
+
+$(TEST_DIR)/rv32um-p-%.elf: $(RVTESTS)/isa/rv32um/%.S
+	@mkdir -p $(@D)
+	$(RV_GCC) $(UM_MARCH) $(RV_ABI) $(RV_TFLAGS) $< -o $@
 
 $(TEST_DIR)/%.bin: $(TEST_DIR)/%.elf
 	$(RV_OBJCOPY) -O binary $< $@
 
-tests: $(UI_ELFS) $(UI_BINS)
+tests: $(ALL_ELFS) $(ALL_BINS)
 
+# Run every suite; fail at the end if any suite failed.
 test: sim tests
-	scripts/run_tests.sh rv32ui
+	@rc=0; for s in $(SUITES); do scripts/run_tests.sh $$s || rc=1; echo; done; exit $$rc
 
 test-stress: sim tests
-	scripts/run_tests.sh rv32ui --random-wait --seed 7
+	@rc=0; for s in $(SUITES); do scripts/run_tests.sh $$s --random-wait --seed 7 || rc=1; echo; done; exit $$rc
 
 lockstep: sim tests
-	python3 scripts/lockstep.py $(UI_ELFS)
+	python3 scripts/lockstep.py $(ALL_ELFS)
 
 clean:
 	rm -rf $(BUILD)
